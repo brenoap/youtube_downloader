@@ -1,5 +1,8 @@
 import express from 'express';
 import cors from 'cors';
+import { Innertube, UniversalCache, Log } from 'youtubei.js';
+
+Log.setLevel(Log.Level.NONE);
 import { createServer as createViteServer } from 'vite';
 
 async function startServer() {
@@ -18,8 +21,7 @@ async function startServer() {
     return match ? match[1] : null;
   }
 
-  // Use a public Piped API instance to bypass YouTube's IP blocks
-  const PIPED_API_URL = 'https://pipedapi.kavin.rocks';
+  let yt: Innertube | null = null;
 
   app.get('/api/info', async (req, res) => {
     try {
@@ -33,51 +35,55 @@ async function startServer() {
         return res.status(400).json({ error: 'Invalid YouTube URL' });
       }
 
-      const response = await fetch(`${PIPED_API_URL}/streams/${videoId}`);
-      if (!response.ok) {
-        throw new Error('Failed to fetch video info from Piped API');
+      if (!yt) {
+        yt = await Innertube.create({ cache: new UniversalCache(false) });
       }
 
-      const info = await response.json();
+      const info = await yt.getInfo(videoId);
+
+      if (info.playability_status?.status === 'LOGIN_REQUIRED') {
+        return res.status(403).json({ error: 'YouTube requires login to access this video. It might be age-restricted or YouTube is blocking the request.' });
+      }
+      if (info.playability_status?.status === 'ERROR') {
+        return res.status(400).json({ error: info.playability_status.reason || 'Video is unavailable' });
+      }
 
       const formats: any[] = [];
 
-      // Add video streams
-      if (info.videoStreams) {
-        info.videoStreams.forEach((stream: any) => {
-          formats.push({
-            itag: stream.url, // Use URL as the identifier for downloading
-            qualityLabel: stream.quality,
-            container: stream.format.toLowerCase(),
-            hasVideo: true,
-            hasAudio: !stream.videoOnly,
-            contentLength: stream.contentLength?.toString() || null,
-            mimeType: stream.mimeType
-          });
-        });
-      }
+      // Add video formats
+      const videoFormats = info.streaming_data?.formats || [];
+      const adaptiveFormats = info.streaming_data?.adaptive_formats || [];
+      
+      const allFormats = [...videoFormats, ...adaptiveFormats];
 
-      // Add audio streams
-      if (info.audioStreams) {
-        info.audioStreams.forEach((stream: any) => {
-          formats.push({
-            itag: stream.url,
-            qualityLabel: 'Audio',
-            container: stream.format.toLowerCase(),
-            hasVideo: false,
-            hasAudio: true,
-            contentLength: stream.contentLength?.toString() || null,
-            mimeType: stream.mimeType
-          });
+      allFormats.forEach((stream: any) => {
+        if (!stream.url && !stream.signature_cipher) return;
+        
+        const isVideo = stream.has_video;
+        const isAudio = stream.has_audio;
+        
+        if (!isVideo && !isAudio) return;
+
+        formats.push({
+          itag: stream.itag.toString(),
+          qualityLabel: stream.quality_label || 'Audio',
+          container: stream.mime_type.split(';')[0].split('/')[1] || 'mp4',
+          hasVideo: isVideo,
+          hasAudio: isAudio,
+          contentLength: stream.content_length?.toString() || null,
+          mimeType: stream.mime_type.split(';')[0]
         });
-      }
+      });
+
+      // Deduplicate formats by itag
+      const uniqueFormats = Array.from(new Map(formats.map(item => [item.itag, item])).values());
 
       res.json({
-        title: info.title,
-        thumbnail: info.thumbnailUrl,
-        author: info.uploader,
-        lengthSeconds: info.duration?.toString() || '0',
-        formats
+        title: info.basic_info.title,
+        thumbnail: info.basic_info.thumbnail?.[0]?.url || '',
+        author: info.basic_info.author,
+        lengthSeconds: info.basic_info.duration?.toString() || '0',
+        formats: uniqueFormats
       });
     } catch (error: any) {
       console.error('Error fetching video info:', error);
@@ -87,37 +93,37 @@ async function startServer() {
 
   app.get('/api/download', async (req, res) => {
     try {
-      const streamUrl = req.query.itag as string; // We passed the URL as itag
+      const url = req.query.url as string;
+      const itag = req.query.itag as string;
       const title = (req.query.title as string || 'video').replace(/[^\w\s]/gi, '');
       const ext = req.query.ext as string || 'mp4';
 
-      if (!streamUrl) {
-        return res.status(400).json({ error: 'Missing stream URL' });
+      if (!url || !itag) {
+        return res.status(400).json({ error: 'Missing URL or itag' });
+      }
+
+      const videoId = extractVideoId(url);
+      if (!videoId) {
+        return res.status(400).json({ error: 'Invalid YouTube URL' });
+      }
+
+      if (!yt) {
+        yt = await Innertube.create({ cache: new UniversalCache(false) });
       }
 
       res.header('Content-Disposition', `attachment; filename="${title}.${ext}"`);
       
-      // Proxy the stream from Piped to the client
-      const response = await fetch(streamUrl);
-      
-      if (!response.ok || !response.body) {
-        throw new Error('Failed to fetch stream from Piped API');
-      }
+      const stream = await yt.download(videoId, {
+        type: 'video+audio',
+        quality: 'best',
+        format: ext as any,
+        client: 'ANDROID'
+      });
 
-      const contentType = response.headers.get('content-type');
-      if (contentType) {
-        res.header('Content-Type', contentType);
-      }
-
-      const contentLength = response.headers.get('content-length');
-      if (contentLength) {
-        res.header('Content-Length', contentLength);
-      }
-
-      // @ts-ignore - Node.js fetch body is a ReadableStream which can be piped in newer Node versions,
-      // but to be safe we can use stream.Readable.fromWeb
+      // The stream is a ReadableStream
+      // @ts-ignore
       const { Readable } = await import('stream');
-      const nodeStream = Readable.fromWeb(response.body as any);
+      const nodeStream = Readable.fromWeb(stream as any);
       nodeStream.pipe(res);
 
     } catch (error: any) {

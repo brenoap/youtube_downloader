@@ -72,7 +72,7 @@ export default function App() {
   const handleDownload = (itag: string, container: string) => {
     if (!videoInfo) return;
     const title = encodeURIComponent(videoInfo.title);
-    window.location.href = `/api/download?itag=${encodeURIComponent(itag)}&title=${title}&ext=${container}`;
+    window.location.href = `/api/download?url=${encodeURIComponent(url)}&itag=${encodeURIComponent(itag)}&title=${title}&ext=${container}`;
   };
 
   // Group formats
@@ -153,12 +153,18 @@ export default function App() {
             >
               <div className="md:flex">
                 <div className="md:w-2/5 relative">
-                  <img
-                    src={videoInfo.thumbnail}
-                    alt={videoInfo.title}
-                    className="w-full h-full object-cover aspect-video md:aspect-auto"
-                    referrerPolicy="no-referrer"
-                  />
+                  {videoInfo.thumbnail ? (
+                    <img
+                      src={videoInfo.thumbnail}
+                      alt={videoInfo.title}
+                      className="w-full h-full object-cover aspect-video md:aspect-auto"
+                      referrerPolicy="no-referrer"
+                    />
+                  ) : (
+                    <div className="w-full h-full bg-zinc-200 flex items-center justify-center aspect-video md:aspect-auto">
+                      <span className="text-zinc-400">No thumbnail</span>
+                    </div>
+                  )}
                   <div className="absolute bottom-3 right-3 bg-black/80 text-white text-xs font-medium px-2 py-1 rounded">
                     {formatDuration(videoInfo.lengthSeconds)}
                   </div>
