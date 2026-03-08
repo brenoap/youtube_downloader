@@ -1,0 +1,5 @@
+{
+  "name": "YouTube Video Downloader",
+  "description": "An app to download YouTube videos from a URL.",
+  "requestFramePermissions": []
+}
